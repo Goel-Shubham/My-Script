@@ -1,0 +1,61 @@
+COL samples for a10
+col Percent for 999
+COL plan_hash_value FOR 9999999999 HEA 'Plan|Hash Value';
+COL line_id_ff                      FOR 9999999 HEA "Line id";
+COL operation_ff                    FOR A50 HEA "Operation";
+COL current_object_ff               FOR A60 HEA "Current object";
+COL timed_event_ff                  FOR A70 HEA "Timed event";
+SET LINES 300 PAGES 300
+DEF x_slices = '20';
+WITH
+events AS (
+SELECT /*+ MATERIALIZE */
+       h.sql_plan_hash_value plan_hash_value,
+       NVL(h.sql_plan_line_id, 0) line_id_ff,
+       SUBSTR(h.sql_plan_operation||' '||h.sql_plan_options, 1, 50) operation_ff,
+       CASE h.session_state WHEN 'ON CPU' THEN -1 ELSE h.current_obj# END current_obj#,
+       CASE h.session_state WHEN 'ON CPU' THEN h.session_state ELSE h.wait_class||' "'||h.event||'"' END timed_event,
+       COUNT(*) samples
+  FROM gv$active_session_history h
+ WHERE sql_id = '&SQL_ID'
+ GROUP BY
+       h.sql_plan_hash_value,
+       h.sql_plan_line_id,
+       h.sql_plan_operation,
+       h.sql_plan_options,
+       CASE h.session_state WHEN 'ON CPU' THEN -1 ELSE h.current_obj# END,
+       CASE h.session_state WHEN 'ON CPU' THEN h.session_state ELSE h.wait_class||' "'||h.event||'"' END
+ ORDER BY
+       6 DESC
+),
+total AS (
+SELECT SUM(samples) samples,
+       SUM(CASE WHEN ROWNUM > &&x_slices. THEN samples ELSE 0 END) others
+  FROM events
+)
+SELECT e.samples samples_ff,
+       ROUND(100 * e.samples / t.samples, 1) percent_ff,
+       e.plan_hash_value,
+       e.line_id_ff,
+       e.operation_ff,
+       SUBSTR(e.current_obj#||' '||TRIM(
+       (SELECT CASE e.current_obj# WHEN 0 THEN ' UNDO' ELSE ' '||o.owner||'.'||o.object_name||' ('||o.object_type||')' END
+          FROM dba_objects o WHERE o.object_id(+) = e.current_obj# AND ROWNUM = 1) 
+       ), 1, 60) current_object_ff,
+       e.timed_event timed_event_ff
+  FROM events e,
+       total t
+ WHERE ROWNUM <= &&x_slices.
+   AND ROUND(100 * e.samples / t.samples, 1) > 0.1
+ UNION ALL
+SELECT others samples_ff,
+       ROUND(100 * others / samples, 1) percent_ff,
+       TO_NUMBER(NULL) plan_hash_value, 
+       TO_NUMBER(NULL) id, 
+       NULL operation_ff, 
+       NULL current_object_ff,
+       'Others' timed_event_ff
+  FROM total
+ WHERE others > 0
+   AND ROUND(100 * others / samples, 1) > 0.1
+/
